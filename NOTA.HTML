@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Faktur Penjualan Interaktif</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Menggunakan font Inter */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f4f7f9;
+        }
+        /* Style untuk menyembunyikan elemen saat ekspor */
+        .hide-on-export {
+            display: block;
+        }
+        /* Media query untuk menyembunyikan tombol aksi di desktop, saat dicetak/dikonversi */
+        @media print {
+            .hide-on-export, .action-col, .user-info {
+                display: none !important;
+            }
+        }
+        /* Style untuk elemen yang dapat diedit (input) agar terlihat seperti teks biasa */
+        .invoice-input {
+            border: 1px solid #e5e7eb;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.375rem;
+            width: 100%;
+            transition: all 0.2s;
+        }
+        .invoice-input:focus {
+            outline: none;
+            border-color: #6d28d9; /* Purple */
+            box-shadow: 0 0 0 2px rgba(109, 40, 217, 0.2);
+        }
+        /* Style untuk select dropdown */
+        .invoice-select {
+            appearance: none;
+            background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2020%2020%22%20fill%3D%22none%22%20stroke%3D%22%236d28d9%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%2F%3E%3C%2Fsvg%3E");
+            background-repeat: no-repeat;
+            background-position: right 0.75rem center;
+            background-size: 0.65em auto;
+            padding-right: 2.5rem;
+        }
+    </style>
+    <!-- Load Firebase Modules -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Set Debug logging for Firestore
+        setLogLevel('Debug');
+        
+        // Inisialisasi Firebase (Gunakan variabel global dari Canvas)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+        if (Object.keys(firebaseConfig).length > 0) {
+            const app = initializeApp(firebaseConfig);
+            window.db = getFirestore(app);
+            window.auth = getAuth(app);
+        } else {
+            console.error("Firebase config is missing or invalid.");
+            // Gunakan variabel dummy jika Firebase tidak tersedia
+            window.db = null;
+            window.auth = null;
+        }
+
+        // Otentikasi
+        window.isAuthReady = false;
+        if (window.auth) {
+            onAuthStateChanged(window.auth, async (user) => {
+                if (user) {
+                    window.userId = user.uid;
+                } else if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    try {
+                        await signInWithCustomToken(window.auth, __initial_auth_token);
+                    } catch (error) {
+                        console.error("Error signing in with custom token:", error);
+                        await signInAnonymously(window.auth);
+                    }
+                } else {
+                    await signInAnonymously(window.auth);
+                    window.userId = window.auth.currentUser?.uid || crypto.randomUUID();
+                }
+
+                // Setelah otentikasi selesai
+                window.isAuthReady = true;
+                if (window.userId) {
+                    document.getElementById('user-id-display').textContent = window.userId;
+                }
+                document.dispatchEvent(new Event('auth-ready'));
+            });
+        } else {
+            // Fallback jika tidak ada Firebase Auth
+            window.userId = crypto.randomUUID();
+            window.isAuthReady = true;
+            document.dispatchEvent(new Event('auth-ready'));
+        }
+
+        // Variabel global untuk Auto Save
+        window.appId = appId;
+        window.setDoc = setDoc;
+        window.doc = doc;
+        window.onSnapshot = onSnapshot;
+
+    </script>
+    
+    <!-- Load html2canvas dan jspdf untuk ekspor -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary-purple': '#6d28d9',
+                    },
+                }
+            }
+        }
+    </script>
+</head>
+<body class="p-4 sm:p-8">
+    <!-- Tampilan ID Pengguna (Wajib untuk aplikasi multi-user/kolaboratif) -->
+    <div class="user-info hide-on-export fixed top-0 right-0 p-2 text-xs bg-gray-100 rounded-bl-lg shadow-md">
+        User ID: <span id="user-id-display" class="font-mono font-semibold text-primary-purple">Loading...</span>
+    </div>
+
+    <div class="max-w-4xl mx-auto bg-white shadow-xl rounded-xl p-6 sm:p-10 mb-8">
+        
+        <!-- Tombol Aksi (Pesanan Baru, PNG, PDF) -->
+        <div class="hide-on-export flex justify-center space-x-4 mb-6">
+            <button onclick="newInvoice()" class="bg-primary-purple hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-150">
+                Pesanan Baru
+            </button>
+            <button onclick="exportToPng()" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-150">
+                Simpan sebagai PNG
+            </button>
+            <button onclick="exportToPdf()" class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-150">
+                Simpan sebagai PDF
+            </button>
+        </div>
+
+        <!-- Kontainer Faktur yang Akan Di-capture -->
+        <div id="invoice-capture" class="p-0 sm:p-2">
+            
+            <!-- Header Faktur -->
+            <div class="flex justify-between items-start mb-8 border-b pb-4">
+                <h1 class="text-3xl sm:text-4xl font-extrabold text-primary-purple tracking-wider">
+                    FAKTUR PENJUALAN
+                </h1>
+                <div class="text-right">
+                    <p class="text-sm text-gray-600">No. Faktur:</p>
+                    <input id="invoice-number" type="text" value="INV-0001" oninput="saveDataDelayed()" class="text-xl sm:text-2xl font-bold text-gray-800 text-right border-none p-0 focus:ring-0" />
+                    <p class="text-xs text-gray-500 mt-1">Tanggal: <input id="invoice-date" type="text" value="27 Oktober 2025" oninput="saveDataDelayed()" class="text-xs text-gray-500 border-none p-0 focus:ring-0 w-24 text-right" /></p>
+                </div>
+            </div>
+
+            <!-- Detail Pelanggan & Pembayaran -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                <div>
+                    <label for="customer" class="text-sm font-semibold text-gray-600">Pelanggan</label>
+                    <input id="customer" type="text" value="FAREL" oninput="saveDataDelayed()" class="invoice-input mt-1" />
+                </div>
+                <div>
+                    <label for="payment-method" class="text-sm font-semibold text-gray-600">Metode Pembayaran</label>
+                    <!-- Diganti menjadi <select> -->
+                    <select id="payment-method" onchange="saveDataDelayed()" class="invoice-input invoice-select mt-1">
+                        <option value="Transfer Bank">Transfer Bank</option>
+                        <option value="Tunai">Tunai</option>
+                        <option value="E-Wallet">E-Wallet</option>
+                        <option value="Kartu Kredit">Kartu Kredit</option>
+                    </select>
+                </div>
+                <div class="md:col-span-2">
+                    <label for="payment-status" class="text-sm font-semibold text-gray-600">Status Pembayaran</label>
+                    <!-- Diganti menjadi <select> -->
+                    <select id="payment-status" onchange="updateStatusColor(); saveDataDelayed();" class="invoice-input invoice-select mt-1">
+                        <option value="Pending">Pending</option>
+                        <option value="Lunas">Lunas</option>
+                        <option value="Jatuh Tempo">Jatuh Tempo</option>
+                        <option value="Dibatalkan">Dibatalkan</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Tabel Barang -->
+            <div class="overflow-x-auto shadow-md rounded-lg">
+                <table class="min-w-full bg-white text-sm">
+                    <thead>
+                        <tr class="bg-gray-100 text-gray-600 uppercase text-xs leading-normal">
+                            <th class="py-3 px-4 text-left w-1/3">Nama Barang</th>
+                            <th class="py-3 px-4 text-right">Harga Satuan (Rp)</th>
+                            <th class="py-3 px-4 text-center">Qty</th>
+                            <th class="py-3 px-4 text-right">Total (Rp)</th>
+                            <th class="py-3 px-4 text-center action-col hide-on-export">Aksi</th>
+                        </tr>
+                    </thead>
+                    <tbody id="invoice-items" class="text-gray-700">
+                        <!-- Item akan diisi oleh JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- Tombol Tambah Barang -->
+            <button onclick="addItem()" class="hide-on-export mt-4 px-6 py-2 bg-primary-purple hover:bg-purple-700 text-white font-semibold rounded-lg shadow-md transition duration-150 flex items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clip-rule="evenodd" />
+                </svg>
+                Tambah Barang
+            </button>
+
+
+            <!-- Ringkasan Total -->
+            <div class="flex justify-end mt-8">
+                <div class="w-full md:w-1/2 lg:w-1/3 space-y-2">
+                    <div class="flex justify-between text-base">
+                        <span class="text-gray-600">Subtotal:</span>
+                        <span id="subtotal" class="font-medium">Rp 0</span>
+                    </div>
+                    <div class="flex justify-between text-base">
+                        <span class="text-gray-600">Pajak (0%):</span>
+                        <span id="tax-amount" class="font-medium">Rp 0</span>
+                    </div>
+                    <div class="flex justify-between items-center pt-2 border-t-2 border-gray-200">
+                        <span class="text-xl font-bold text-primary-purple uppercase">TOTAL AKHIR:</span>
+                        <span id="final-total" class="text-2xl font-extrabold text-primary-purple">Rp 0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Catatan/Keterangan Tambahan -->
+            <div class="mt-10">
+                <label for="notes" class="text-sm font-semibold text-gray-600">Catatan/Keterangan Tambahan:</label>
+                <textarea id="notes" oninput="saveDataDelayed()" class="invoice-input mt-1 h-20 resize-none">Terima kasih atas pesanan Anda!</textarea>
+            </div>
+
+        </div> <!-- Akhir invoice-capture -->
+    </div>
+
+    <!-- Modal Konfirmasi Pesanan Baru -->
+    <div id="new-invoice-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div class="mt-3 text-center">
+                <h3 class="text-lg leading-6 font-medium text-gray-900">Konfirmasi Pesanan Baru</h3>
+                <div class="mt-2 px-7 py-3">
+                    <p class="text-sm text-gray-500">
+                        Apakah Anda yakin ingin membuat faktur baru? Faktur yang sedang Anda kerjakan saat ini telah tersimpan otomatis di cloud.
+                    </p>
+                </div>
+                <div class="items-center px-4 py-3">
+                    <button id="confirm-new-invoice" class="px-4 py-2 bg-primary-purple text-white text-base font-medium rounded-md w-full shadow-sm hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 transition duration-150 sm:ml-3 sm:w-auto">
+                        Ya, Pesanan Baru
+                    </button>
+                    <button id="cancel-new-invoice" class="mt-3 px-4 py-2 bg-gray-200 text-gray-700 text-base font-medium rounded-md w-full shadow-sm hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-500 transition duration-150 sm:mt-0 sm:w-auto">
+                        Batalkan
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <script>
+        // Data awal faktur global
+        // Dapatkan ID faktur terakhir yang aktif dari localStorage atau buat yang baru
+        let invoiceId = localStorage.getItem('lastActiveInvoiceId') || `INV-${crypto.randomUUID()}`; 
+        let items = [];
+        let saveTimeout;
+        let isReceivingData = false; // Flag untuk mencegah overwrite saat menerima data
+        let currentUnsubscribe = null; // Untuk mengelola listener Firestore
+
+        const invoiceNumberEl = document.getElementById('invoice-number');
+        const invoiceItemsEl = document.getElementById('invoice-items');
+        const subtotalEl = document.getElementById('subtotal');
+        const taxAmountEl = document.getElementById('tax-amount');
+        const finalTotalEl = document.getElementById('final-total');
+        const paymentStatusEl = document.getElementById('payment-status');
+        const paymentMethodEl = document.getElementById('payment-method');
+        
+        // Elemen Modal
+        const modalEl = document.getElementById('new-invoice-modal');
+        const confirmNewInvoiceBtn = document.getElementById('confirm-new-invoice');
+        const cancelNewInvoiceBtn = document.getElementById('cancel-new-invoice');
+
+        // Fungsi untuk memformat angka menjadi format Rupiah
+        const formatRupiah = (number) => {
+            return new Intl.NumberFormat('id-ID', {
+                style: 'currency',
+                currency: 'IDR',
+                minimumFractionDigits: 0
+            }).format(number);
+        };
+
+        // Fungsi untuk mengupdate warna status pembayaran
+        const updateStatusColor = () => {
+            paymentStatusEl.classList.remove('bg-yellow-100', 'text-yellow-800', 'border-yellow-300', 'bg-green-100', 'text-green-800', 'border-green-300', 'bg-red-100', 'text-red-800', 'border-red-300', 'bg-gray-100', 'text-gray-800', 'border-gray-300');
+            const status = paymentStatusEl.value;
+            if (status === 'Pending') {
+                paymentStatusEl.classList.add('bg-yellow-100', 'text-yellow-800', 'border-yellow-300');
+            } else if (status === 'Lunas') {
+                paymentStatusEl.classList.add('bg-green-100', 'text-green-800', 'border-green-300');
+            } else if (status === 'Jatuh Tempo') {
+                paymentStatusEl.classList.add('bg-red-100', 'text-red-800', 'border-red-300');
+            } else {
+                paymentStatusEl.classList.add('bg-gray-100', 'text-gray-800', 'border-gray-300');
+            }
+        };
+
+        // Fungsi untuk menghitung total faktur
+        const calculateTotals = () => {
+            let subtotal = 0;
+            items.forEach(item => {
+                subtotal += (item.price || 0) * (item.qty || 0);
+            });
+
+            // Pajak 0%
+            const taxRate = 0;
+            const taxAmount = subtotal * taxRate;
+            const finalTotal = subtotal + taxAmount;
+
+            subtotalEl.textContent = formatRupiah(subtotal);
+            taxAmountEl.textContent = formatRupiah(taxAmount);
+            finalTotalEl.textContent = formatRupiah(finalTotal);
+            
+            // Panggil save setelah total dihitung (Auto-Save)
+            if (!isReceivingData) {
+                saveDataDelayed();
+            }
+        };
+
+        // Fungsi untuk merender item ke dalam tabel
+        const renderItems = () => {
+            invoiceItemsEl.innerHTML = '';
+            items.forEach((item, index) => {
+                const total = (item.price || 0) * (item.qty || 0);
+                const row = document.createElement('tr');
+                row.className = 'border-b hover:bg-gray-50';
+                
+                // Menggunakan input type text/number agar data bisa diubah langsung
+                row.innerHTML = `
+                    <td class="py-3 px-4 text-left">
+                        <input type="text" value="${item.name || ''}" 
+                            oninput="updateItem(${index}, 'name', this.value)" 
+                            class="invoice-input border-none p-0 focus:ring-0">
+                    </td>
+                    <td class="py-3 px-4 text-right">
+                        <input type="number" value="${item.price || 0}" 
+                            oninput="updateItem(${index}, 'price', parseInt(this.value) || 0)" 
+                            class="invoice-input border-none p-0 focus:ring-0 text-right w-full" min="0">
+                    </td>
+                    <td class="py-3 px-4 text-center">
+                        <input type="number" value="${item.qty || 0}" 
+                            oninput="updateItem(${index}, 'qty', parseInt(this.value) || 0)" 
+                            class="invoice-input border-none p-0 focus:ring-0 text-center w-full" min="1">
+                    </td>
+                    <td class="py-3 px-4 text-right font-semibold">${formatRupiah(total)}</td>
+                    <td class="py-3 px-4 text-center action-col hide-on-export">
+                        <button onclick="deleteItem(${index})" class="text-red-500 hover:text-red-700 transition duration-150 p-2 rounded-full hover:bg-red-100" aria-label="Hapus Item">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
+                            </svg>
+                        </button>
+                    </td>
+                `;
+                invoiceItemsEl.appendChild(row);
+            });
+            calculateTotals();
+        };
+
+        // Fungsi untuk menambah item baru
+        window.addItem = () => {
+            items.push({ name: 'Nama Barang Baru', price: 0, qty: 1 });
+            renderItems();
+        };
+
+        // Fungsi untuk menghapus item
+        window.deleteItem = (index) => {
+            items.splice(index, 1);
+            renderItems();
+        };
+
+        // Fungsi untuk mengupdate item saat input berubah
+        window.updateItem = (index, key, value) => {
+            items[index][key] = value;
+            calculateTotals(); // Hitung ulang total dan panggil saveDataDelayed
+        };
+        
+        // --- Logic Pesanan Baru (New Invoice) ---
+
+        const showNewInvoiceModal = () => {
+            modalEl.classList.remove('hidden');
+        };
+
+        const hideNewInvoiceModal = () => {
+            modalEl.classList.add('hidden');
+        };
+        
+        window.newInvoice = () => {
+            showNewInvoiceModal();
+        };
+        
+        // Logika setelah user mengkonfirmasi pesanan baru
+        confirmNewInvoiceBtn.onclick = () => {
+            hideNewInvoiceModal();
+            
+            // 1. Generate new unique ID
+            invoiceId = `INV-${crypto.randomUUID().substring(0, 8).toUpperCase()}`; // ID unik
+            localStorage.setItem('lastActiveInvoiceId', invoiceId); // Simpan ID baru
+
+            // 2. Reset form elements and state
+            isReceivingData = true; 
+            
+            // Reset inputs
+            invoiceNumberEl.value = invoiceId;
+            document.getElementById('invoice-date').value = new Date().toLocaleDateString('id-ID', { day: '2-digit', month: 'long', year: 'numeric' });
+            document.getElementById('customer').value = "Nama Pelanggan Baru";
+            document.getElementById('notes').value = "Terima kasih atas pesanan Anda!";
+            
+            // Reset select fields
+            paymentMethodEl.value = 'Transfer Bank';
+            paymentStatusEl.value = 'Pending';
+            updateStatusColor();
+
+            // Reset items
+            items = [{ name: 'Item Contoh', price: 100000, qty: 1 }];
+            renderItems();
+
+            isReceivingData = false;
+
+            // 3. Simpan faktur baru (kosong) ke Firestore
+            window.saveData(); 
+            
+            // 4. Re-attach listener untuk ID baru
+            loadListener(); 
+
+            console.log(`Membuat Pesanan Baru dengan ID: ${invoiceId}`);
+        };
+
+        cancelNewInvoiceBtn.onclick = hideNewInvoiceModal;
+
+
+        // --- Auto Save dengan Firestore ---
+
+        const getInvoiceData = () => {
+            return {
+                invoiceId: invoiceNumberEl.value,
+                date: document.getElementById('invoice-date').value,
+                customer: document.getElementById('customer').value,
+                paymentMethod: paymentMethodEl.value,
+                paymentStatus: paymentStatusEl.value,
+                notes: document.getElementById('notes').value,
+                items: JSON.stringify(items), // Simpan array objek sebagai string
+                updatedAt: new Date().toISOString()
+            };
+        };
+
+        window.saveData = async () => {
+            if (!window.isAuthReady || !window.db || isReceivingData) return;
+
+            const currentInvoiceId = invoiceNumberEl.value;
+            // Jika ID faktur di UI diubah manual, update variabel global dan localStorage
+            if (currentInvoiceId !== invoiceId) {
+                invoiceId = currentInvoiceId;
+                localStorage.setItem('lastActiveInvoiceId', invoiceId);
+            }
+            
+            const data = getInvoiceData();
+            const docRef = window.doc(window.db, `artifacts/${window.appId}/users/${window.userId}/invoices/${data.invoiceId}`);
+            
+            try {
+                await window.setDoc(docRef, data, { merge: true });
+                localStorage.setItem('lastActiveInvoiceId', data.invoiceId); 
+                console.log("Faktur berhasil disimpan otomatis.");
+            } catch (e) {
+                console.error("Error saat menyimpan faktur: ", e);
+            }
+        };
+
+        // Debounce function for delayed saving
+        window.saveDataDelayed = () => {
+            clearTimeout(saveTimeout);
+            saveTimeout = setTimeout(window.saveData, 1000); // Tunggu 1 detik setelah input berhenti
+        };
+
+
+        // --- Load Data dari Firestore ---
+        // Fungsi untuk mengatur snapshot listener
+        const loadListener = () => {
+             if (currentUnsubscribe) {
+                currentUnsubscribe(); // Hapus listener lama
+                currentUnsubscribe = null;
+            }
+
+            if (!window.isAuthReady || !window.db) return;
+
+            // Gunakan invoiceId yang terakhir aktif (dari localStorage/initial)
+            const docRef = window.doc(window.db, `artifacts/${window.appId}/users/${window.userId}/invoices/${invoiceId}`);
+            
+            currentUnsubscribe = window.onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    isReceivingData = true;
+                    const data = docSnap.data();
+                    
+                    // Update global invoiceId and localStorage with loaded ID
+                    invoiceId = data.invoiceId || invoiceId;
+                    localStorage.setItem('lastActiveInvoiceId', invoiceId);
+                    
+                    // Set nilai dari Firestore ke elemen HTML
+                    invoiceNumberEl.value = data.invoiceId || invoiceId;
+                    document.getElementById('invoice-date').value = data.date || document.getElementById('invoice-date').value;
+                    document.getElementById('customer').value = data.customer || document.getElementById('customer').value;
+                    document.getElementById('notes').value = data.notes || document.getElementById('notes').value;
+                    
+                    // Set dropdown value (pastikan value ada di opsi)
+                    paymentMethodEl.value = data.paymentMethod || 'Transfer Bank';
+                    paymentStatusEl.value = data.paymentStatus || 'Pending';
+                    updateStatusColor();
+
+                    // Load item
+                    try {
+                        items = JSON.parse(data.items || '[]');
+                    } catch (e) {
+                        console.error("Gagal memparsing item faktur:", e);
+                        items = [];
+                    }
+                    
+                    renderItems();
+                    isReceivingData = false;
+                    console.log("Faktur berhasil dimuat/diperbarui dari Firestore.");
+                } else {
+                    console.log(`Dokumen faktur (${invoiceId}) tidak ditemukan. Membuat yang baru.`);
+                    // Jika tidak ada, simpan data default awal/kosong
+                    if (items.length === 0) {
+                        items = [{ name: '80 ROBUX', price: 25000, qty: 3 }];
+                    }
+                    // Pastikan nomor faktur di UI sesuai dengan invoiceId global
+                    invoiceNumberEl.value = invoiceId; 
+                    renderItems();
+                    window.saveData(); // Simpan faktur awal
+                }
+            }, (error) => {
+                console.error("Error mendengarkan perubahan faktur:", error);
+            });
+        };
+
+        // This function is now just a wrapper to start the listener after auth
+        const loadData = () => {
+            loadListener();
+        }
+
+        // --- Fungsi Ekspor (Tidak ada perubahan) ---
+
+        // Fungsi untuk menyembunyikan elemen sebelum capture dan menampilkannya kembali
+        const toggleExportElements = (hide) => {
+            const elements = document.querySelectorAll('.hide-on-export');
+            elements.forEach(el => {
+                // Gunakan style.visibility untuk menyembunyikan elemen tanpa mengubah layout
+                el.style.visibility = hide ? 'hidden' : 'visible';
+                // Namun, untuk kolom tabel (action-col), kita tetap harus mengubah display agar tabel tidak melebar
+            });
+            // Pastikan kolom Aksi juga tersembunyi
+            document.querySelectorAll('.action-col').forEach(col => {
+                col.style.display = hide ? 'none' : 'table-cell';
+            });
+            // Untuk memastikan elemen luar (Tombol Aksi) benar-benar hilang dari layout
+            document.querySelectorAll('.hide-on-export').forEach(el => {
+                 if (el.tagName !== 'BUTTON' && el.tagName !== 'DIV') return;
+                 el.style.display = hide ? 'none' : 'flex';
+            });
+        };
+        
+        // Fungsi Ekspor ke PNG
+        window.exportToPng = () => {
+            const invoice = document.getElementById('invoice-capture');
+            const fileName = invoiceNumberEl.value + '_' + document.getElementById('customer').value + '.png';
+
+            toggleExportElements(true);
+
+            html2canvas(invoice, { scale: 2 }).then(canvas => {
+                const image = canvas.toDataURL('image/png');
+                const link = document.createElement('a');
+                link.href = image;
+                link.download = fileName;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                toggleExportElements(false);
+            });
+        };
+
+        // Fungsi Ekspor ke PDF
+        window.exportToPdf = () => {
+            const invoice = document.getElementById('invoice-capture');
+            const fileName = invoiceNumberEl.value + '_' + document.getElementById('customer').value + '.pdf';
+            
+            toggleExportElements(true);
+
+            html2canvas(invoice, { scale: 2 }).then(canvas => {
+                const imgData = canvas.toDataURL('image/png');
+                const pdf = new jspdf.jsPDF('p', 'mm', 'a4');
+                const imgProps = pdf.getImageProperties(imgData);
+                const pdfWidth = pdf.internal.pageSize.getWidth() - 20; // Margin 10mm kiri/kanan
+                const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+                
+                pdf.addImage(imgData, 'PNG', 10, 10, pdfWidth, pdfHeight);
+                pdf.save(fileName);
+                
+                toggleExportElements(false);
+            });
+        };
+
+        // Inisialisasi: Panggil renderItems saat halaman dimuat
+        document.addEventListener('DOMContentLoaded', () => {
+            // Set tanggal hari ini jika belum ada
+            const today = new Date();
+            const options = { day: '2-digit', month: 'long', year: 'numeric' };
+            
+            // Set input tanggal default (hanya jika belum ada di UI)
+            if(!document.getElementById('invoice-date').value || document.getElementById('invoice-date').value === "27 Oktober 2025") {
+                 document.getElementById('invoice-date').value = today.toLocaleDateString('id-ID', options);
+            }
+            
+            // Inisialisasi awal UI
+            updateStatusColor();
+            renderItems();
+
+            // Mulai proses pemuatan data setelah otentikasi siap
+            document.addEventListener('auth-ready', loadData);
+        });
+    </script>
+
+</body>
+</html>
